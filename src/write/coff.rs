@@ -137,7 +137,39 @@ impl<'a> Object<'a> {
         stub_id
     }
 
+    fn build_drectve_section(&self) -> Section {
+        let mut directives = vec![];
+        for symbol in &self.symbols {
+            if symbol.scope == SymbolScope::Dynamic {
+                directives.extend(b" /EXPORT:\"");
+                directives.extend(&symbol.name);
+                directives.extend(b"\"");
+                if symbol.kind != SymbolKind::Text {
+                    directives.extend(b",DATA");
+                }
+            }
+        }
+        Section {
+            segment: vec![],
+            name: b".drectve".to_vec(),
+            kind: SectionKind::Linker,
+            size: directives.len() as u64,
+            align: 1,
+            data: directives.into(),
+            relocations: vec![],
+            symbol: None,
+            flags: SectionFlags::None,
+        }
+    }
+
     pub(crate) fn coff_write(&self, buffer: &mut dyn WritableBuffer) -> Result<()> {
+        // Build a .drectve section to hold linker directives to export symbols.
+        let drectve = self.build_drectve_section();
+        let mut sections: Vec<&Section> = self.sections.iter().collect();
+        if !drectve.data().is_empty() {
+            sections.push(&drectve);
+        }
+
         // Calculate offsets of everything, and build strtab.
         let mut offset = 0;
         let mut strtab = StringTable::default();
@@ -146,11 +178,11 @@ impl<'a> Object<'a> {
         offset += mem::size_of::<coff::ImageFileHeader>();
 
         // Section headers.
-        offset += self.sections.len() * mem::size_of::<coff::ImageSectionHeader>();
+        offset += sections.len() * mem::size_of::<coff::ImageSectionHeader>();
 
         // Calculate size of section data and add section strings to strtab.
-        let mut section_offsets = vec![SectionOffsets::default(); self.sections.len()];
-        for (index, section) in self.sections.iter().enumerate() {
+        let mut section_offsets = vec![SectionOffsets::default(); sections.len()];
+        for (index, section) in sections.iter().enumerate() {
             if section.name.len() > 8 {
                 section_offsets[index].str_id = Some(strtab.add(&section.name));
             }
@@ -205,7 +237,7 @@ impl<'a> Object<'a> {
                 }
             };
             for id in &comdat.sections {
-                let section = &self.sections[id.0];
+                let section = sections[id.0];
                 if section.symbol.is_none() {
                     return Err(Error(format!(
                         "missing symbol for COMDAT section `{}`",
@@ -281,7 +313,7 @@ impl<'a> Object<'a> {
                     }
                 },
             ),
-            number_of_sections: U16::new(LE, self.sections.len() as u16),
+            number_of_sections: U16::new(LE, sections.len() as u16),
             time_date_stamp: U32::default(),
             pointer_to_symbol_table: U32::new(LE, symtab_offset as u32),
             number_of_symbols: U32::new(LE, symtab_count as u32),
@@ -294,7 +326,7 @@ impl<'a> Object<'a> {
         buffer.write(&header);
 
         // Write section headers.
-        for (index, section) in self.sections.iter().enumerate() {
+        for (index, section) in sections.iter().enumerate() {
             let mut characteristics = if let SectionFlags::Coff {
                 characteristics, ..
             } = section.flags
@@ -432,7 +464,7 @@ impl<'a> Object<'a> {
         }
 
         // Write section data and relocations.
-        for (index, section) in self.sections.iter().enumerate() {
+        for (index, section) in sections.iter().enumerate() {
             let len = section.data.len();
             if len != 0 {
                 write_align(buffer, 4);
@@ -604,7 +636,7 @@ impl<'a> Object<'a> {
                 SymbolKind::Section => {
                     debug_assert_eq!(number_of_aux_symbols, 1);
                     let section_index = symbol.section.id().unwrap().0;
-                    let section = &self.sections[section_index];
+                    let section = &sections[section_index];
                     let aux = coff::ImageAuxSymbolSection {
                         length: U32Bytes::new(LE, section.size as u32),
                         number_of_relocations: if section.relocations.len() > 0xffff {
